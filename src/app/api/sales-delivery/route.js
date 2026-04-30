@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import dbConnect from "@/lib/db";
-import Delivery from "@/models/deliveryModels";
+import Delivery from "@/models/Delivery";
 import SalesOrder from "@/models/SalesOrder";
 import Inventory from "@/models/Inventory";
 import StockMovement from "@/models/StockMovement";

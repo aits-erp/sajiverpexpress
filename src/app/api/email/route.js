@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import SalesQuotation from "@/models/SalesQuotationModel";
 import SalesOrder from "@/models/SalesOrder";
-import Delivery from "@/models/deliveryModels";
+import Delivery from "@/models/Delivery";
 import Invoice from "@/models/InvoiceModel";
 import Customer from "@/models/CustomerModel";
 import Supplier from "@/models/SupplierModels";

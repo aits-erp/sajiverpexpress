@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import formidable from "formidable";
 import { Readable } from "stream";
 import dbConnect from "@/lib/db";
-import Delivery from "@/models/deliveryModels";
+import Delivery from "@/models/Delivery";
 import { getTokenFromHeader, verifyJWT } from "@/lib/auth";
 import { v2 as cloudinary } from "cloudinary";
 

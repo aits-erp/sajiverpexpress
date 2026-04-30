@@ -1,32 +1,34 @@
 "use client";
 
-import { useState, useEffect, Suspense, useMemo } from "react";
+import { useState, useEffect, Suspense, useMemo, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import axios from "axios";
 import ItemSection from "@/components/ItemSection";
-import CustomerSearch from "@/components/CustomerSearch";
-import CustomerAddressSelector from "@/components/CustomerAddressSelector";
-import { toast , ToastContainer} from "react-toastify";
+import { toast, ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import { jwtDecode } from "jwt-decode";
 import {
   FaArrowLeft, FaCheck, FaUser, FaCalendarAlt,
-  FaBoxOpen, FaCalculator, FaPaperclip, FaTimes
+  FaBoxOpen, FaCalculator, FaPaperclip, FaTimes,
+  FaFilePdf, FaPlus, FaFileInvoice, FaSearch, FaSave,
+  FaEdit, FaEye, FaTrash, FaPrint, FaDownload
 } from "react-icons/fa";
 
-// ============================================================
-// HELPERS & SUB-COMPONENTS (Defined OUTSIDE to prevent focus loss)
-// ============================================================
+// Helper function
 function formatDateForInput(date) {
   if (!date) return "";
   const d = new Date(date);
   return isNaN(d.getTime()) ? "" : d.toISOString().split('T')[0];
 }
+
 const initialState = {
-  customerCode: "", customerName: "", contactPerson: "", refNumber: "",
-  salesEmployee: "", status: "Open",
-  deliveryDate: formatDateForInput(new Date()), expectedDeliveryDate: "",
-  billingAddress: null, shippingAddress: null,
+  refNumber: "",
+  salesEmployee: "",
+  status: "Draft",
+  deliveryDate: formatDateForInput(new Date()),
+  expectedDeliveryDate: "",
+  timeSlot: "Morning",
+  deliveryShift: 1,
   items: [{
     item: "", itemCode: "", itemId: "", itemName: "", itemDescription: "",
     quantity: 0, allowedQuantity: 0, receivedQuantity: 0,
@@ -35,13 +37,19 @@ const initialState = {
     gstAmount: 0, gstRate: 0, cgstAmount: 0, sgstAmount: 0, igstAmount: 0,
     warehouse: "", warehouseName: "", warehouseCode: "", warehouseId: "",
     managedByBatch: true,
+    customer: "", customerCode: "", customerName: "", contactPerson: "",
   }],
   remarks: "", freight: 0, rounding: 0, totalDownPayment: 0, appliedAmounts: 0,
   totalBeforeDiscount: 0, gstTotal: 0, grandTotal: 0, openBalance: 0,
   attachments: [],
+  isSaved: false,
+  savedAt: null,
 };
 
-const round = (num, d = 2) => { const n = Number(num); return isNaN(n) ? 0 : Number(n.toFixed(d)); };
+const round = (num, d = 2) => {
+  const n = Number(num);
+  return isNaN(n) ? 0 : Number(n.toFixed(d));
+};
 
 function formatDate(d) {
   if (!d) return "";
@@ -78,16 +86,38 @@ const fi = (readOnly = false) =>
 const SectionCard = ({ icon: Icon, title, subtitle, children, color = "indigo" }) => (
   <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mb-5">
     <div className={`flex items-center gap-3 px-6 py-4 border-b border-gray-100 bg-${color}-50/40`}>
-      <div className={`w-8 h-8 rounded-lg bg-${color}-100 flex items-center justify-center text-${color}-500`}><Icon className="text-sm" /></div>
-      <div><p className="text-sm font-bold text-gray-900">{title}</p>{subtitle && <p className="text-xs text-gray-400">{subtitle}</p>}</div>
+      <div className={`w-8 h-8 rounded-lg bg-${color}-100 flex items-center justify-center text-${color}-500`}>
+        <Icon className="text-sm" />
+      </div>
+      <div>
+        <p className="text-sm font-bold text-gray-900">{title}</p>
+        {subtitle && <p className="text-xs text-gray-400">{subtitle}</p>}
+      </div>
     </div>
     <div className="px-6 py-5">{children}</div>
   </div>
 );
 
-// ============================================================
-// MAIN PAGE COMPONENT
-// ============================================================
+function ItemImage({ src, alt, className = "w-10 h-10" }) {
+  const [err, setErr] = useState(false);
+  useEffect(() => { setErr(false); }, [src]);
+
+  if (!src || err) {
+    return (
+      <div className={`${className} rounded-lg border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center shrink-0`}>
+        <FaBoxOpen className="text-gray-300 text-sm" />
+      </div>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={alt || "Item"}
+      className={`${className} object-cover rounded-lg border border-gray-200 shrink-0`}
+      onError={() => setErr(true)}
+    />
+  );
+}
 
 export default function DeliveryPage() {
   return (
@@ -102,19 +132,38 @@ function DeliveryForm() {
   const params = useSearchParams();
   const editId = params.get("editId");
 
-  const [formData, setFormData]           = useState(initialState);
-  const [attachments, setAttachments]     = useState([]);
+  const [formData, setFormData] = useState(initialState);
+  const [attachments, setAttachments] = useState([]);
   const [existingFiles, setExistingFiles] = useState([]);
-  const [removedFiles, setRemovedFiles]   = useState([]);
-  const [loading, setLoading]             = useState(false);
-  const [submitting, setSubmitting]       = useState(false);
-  const [error, setError]                 = useState(null);
-  const [selectedCustomer, setSelectedCustomer] = useState(null);
-  const [isAdmin, setIsAdmin]             = useState(false);
-  const [isCopied, setIsCopied]           = useState(false);
-  const [isNewCustomer, setIsNewCustomer] = useState(false);
+  const [removedFiles, setRemovedFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
-  const [stockError, setStockError]       = useState(null);
+  const [stockError, setStockError] = useState(null);
+  const [customerWiseTotals, setCustomerWiseTotals] = useState({});
+  const [showSummary, setShowSummary] = useState(false);
+  const [isSaved, setIsSaved] = useState(false);
+  
+  // Multiple delivery states
+  const [sameDayDeliveries, setSameDayDeliveries] = useState([]);
+  const [showSameDayWarning, setShowSameDayWarning] = useState(false);
+  const [timeSlot, setTimeSlot] = useState("Morning");
+  const [deliveryShift, setDeliveryShift] = useState(1);
+  const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  const [monthlySummary, setMonthlySummary] = useState(null);
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+  
+  // Customer search in summary
+  const [customerSearchTerm, setCustomerSearchTerm] = useState("");
+  const [filteredCustomerTotals, setFilteredCustomerTotals] = useState({});
+  
+  // Auto-save timer
+  const autoSaveTimer = useRef(null);
+  const [lastAutoSave, setLastAutoSave] = useState(null);
 
   const stableInitial = useMemo(() => initialState, []);
   const isReadOnly = !!editId && !isAdmin;
@@ -130,11 +179,56 @@ function DeliveryForm() {
     } catch (e) { console.error(e); }
   }, []);
 
+  // Auto-save functionality
+  useEffect(() => {
+    if (!formData.isSaved && formData.items.length > 0) {
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+      autoSaveTimer.current = setTimeout(() => {
+        saveToLocalStorage();
+      }, 30000); // Auto-save every 30 seconds
+    }
+    return () => {
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    };
+  }, [formData]);
+
+  const saveToLocalStorage = () => {
+    const saveData = {
+      ...formData,
+      isSaved: true,
+      savedAt: new Date().toISOString()
+    };
+    localStorage.setItem("delivery_draft", JSON.stringify(saveData));
+    setIsSaved(true);
+    setLastAutoSave(new Date());
+    toast.info("Draft auto-saved", { autoClose: 2000 });
+  };
+
+  const loadFromLocalStorage = () => {
+    const saved = localStorage.getItem("delivery_draft");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      setFormData(parsed);
+      setIsSaved(true);
+      toast.info("Loaded saved draft", { autoClose: 2000 });
+    }
+  };
+
+  const clearLocalStorage = () => {
+    localStorage.removeItem("delivery_draft");
+    setIsSaved(false);
+  };
+
   // Load from sessionStorage
   useEffect(() => {
     const stored = sessionStorage.getItem("deliveryData");
     setAttachmentsLoading(true);
-    if (!stored) { setAttachmentsLoading(false); return; }
+    if (!stored) { 
+      // Check local storage for draft
+      loadFromLocalStorage();
+      setAttachmentsLoading(false); 
+      return; 
+    }
     try {
       const parsed = JSON.parse(stored);
       setFormData({ ...stableInitial, ...parsed, deliveryDate: formatDate(new Date()), expectedDeliveryDate: "" });
@@ -157,12 +251,21 @@ function DeliveryForm() {
         .then(res => {
           const record = res.data.data;
           const items = Array.isArray(record.items)
-            ? record.items.map(i => ({ ...stableInitial.items[0], ...i, item: i.item?._id || i.item || "", warehouse: i.warehouse?._id || i.warehouse || "", taxOption: i.taxOption || "GST" }))
+            ? record.items.map(i => ({
+                ...stableInitial.items[0],
+                ...i,
+                item: i.item?._id || i.item || "",
+                warehouse: i.warehouse?._id || i.warehouse || "",
+                taxOption: i.taxOption || "GST",
+                customer: i.customer?._id || i.customer || "",
+                customerCode: i.customerCode || "",
+                customerName: i.customerName || "",
+                contactPerson: i.contactPerson || "",
+              }))
             : [...stableInitial.items];
           setFormData({ ...stableInitial, ...record, items, deliveryDate: formatDate(record.deliveryDate), expectedDeliveryDate: formatDate(record.expectedDeliveryDate) });
-          if (record.customerCode || record.customerName) {
-            setSelectedCustomer({ _id: record.customer, customerCode: record.customerCode, customerName: record.customerName, contactPersonName: record.contactPerson });
-          }
+          setTimeSlot(record.timeSlot || "Morning");
+          setDeliveryShift(record.deliveryShift || 1);
           if (!isCopied) {
             setExistingFiles((record.attachments || []).map(f => ({ fileUrl: f.fileUrl || f.url, fileName: f.fileName || "Attachment" })));
           }
@@ -172,29 +275,103 @@ function DeliveryForm() {
     }
   }, [editId, isCopied, stableInitial]);
 
-  // Totals Calculation
+  // Check for same day deliveries
+  const checkSameDayDeliveries = async (customerId, deliveryDate) => {
+    if (!customerId || !deliveryDate) return;
+    try {
+      const token = localStorage.getItem("token");
+      const res = await axios.get(`/api/delivery/check-same-day`, {
+        params: { customerId, deliveryDate: formatDate(deliveryDate) },
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setSameDayDeliveries(res.data.deliveries);
+      setShowSameDayWarning(res.data.count > 0);
+      if (res.data.count > 0) {
+        setDeliveryShift(res.data.count + 1);
+      }
+    } catch (error) {
+      console.error("Error checking deliveries:", error);
+    }
+  };
+
+  // Totals Calculation with customer-wise grouping
   useEffect(() => {
     const items = Array.isArray(formData.items) ? formData.items : [];
+    
     const totalBeforeDiscount = items.reduce((s, i) => s + (Number(i.unitPrice) * Number(i.quantity) - Number(i.discount)), 0);
     const gstTotal = items.reduce((s, i) => s + (Number(i.gstAmount) || 0), 0);
     const grandTotal = totalBeforeDiscount + gstTotal + Number(formData.freight) + Number(formData.rounding);
     const openBalance = grandTotal - (Number(formData.totalDownPayment) + Number(formData.appliedAmounts));
 
+    const customerTotals = {};
+    items.forEach((item, idx) => {
+      const customerKey = item.customer || `no-customer-${idx}`;
+      const customerName = item.customerName || "No Customer Assigned";
+      
+      if (!customerTotals[customerKey]) {
+        customerTotals[customerKey] = {
+          customerId: customerKey,
+          customerName: customerName,
+          customerCode: item.customerCode || "",
+          subtotal: 0,
+          gstAmount: 0,
+          total: 0,
+          items: [],
+          itemCount: 0
+        };
+      }
+      
+      const itemSubtotal = (Number(item.unitPrice) * Number(item.quantity) - Number(item.discount));
+      const itemGst = (Number(item.gstAmount) || 0);
+      
+      customerTotals[customerKey].subtotal += itemSubtotal;
+      customerTotals[customerKey].gstAmount += itemGst;
+      customerTotals[customerKey].total += itemSubtotal + itemGst;
+      customerTotals[customerKey].items.push(item);
+      customerTotals[customerKey].itemCount++;
+    });
+    
+    setCustomerWiseTotals(customerTotals);
+    
+    // Filter customers based on search term
+    if (customerSearchTerm) {
+      const filtered = {};
+      Object.entries(customerTotals).forEach(([key, data]) => {
+        if (data.customerName.toLowerCase().includes(customerSearchTerm.toLowerCase()) ||
+            data.customerCode.toLowerCase().includes(customerSearchTerm.toLowerCase())) {
+          filtered[key] = data;
+        }
+      });
+      setFilteredCustomerTotals(filtered);
+    } else {
+      setFilteredCustomerTotals(customerTotals);
+    }
+    
     setFormData(prev => {
       if (prev.grandTotal === round(grandTotal) && prev.totalBeforeDiscount === round(totalBeforeDiscount)) return prev;
-      return { 
-        ...prev, 
-        totalBeforeDiscount: round(totalBeforeDiscount), 
-        gstTotal: round(gstTotal), 
-        grandTotal: round(grandTotal), 
-        openBalance: round(openBalance) 
+      return {
+        ...prev,
+        totalBeforeDiscount: round(totalBeforeDiscount),
+        gstTotal: round(gstTotal),
+        grandTotal: round(grandTotal),
+        openBalance: round(openBalance)
       };
     });
-  }, [formData.items, formData.freight, formData.rounding, formData.totalDownPayment, formData.appliedAmounts]);
+  }, [formData.items, formData.freight, formData.rounding, formData.totalDownPayment, formData.appliedAmounts, customerSearchTerm]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData(prev => ({ ...prev, [name]: value, isSaved: false }));
+  };
+
+  const handleDeliveryDateChange = async (e) => {
+    const date = e.target.value;
+    handleChange(e);
+    
+    const firstItemWithCustomer = formData.items.find(item => item.customer);
+    if (firstItemWithCustomer && firstItemWithCustomer.customer) {
+      await checkSameDayDeliveries(firstItemWithCustomer.customer, date);
+    }
   };
 
   const handleItemChange = (index, e) => {
@@ -202,17 +379,19 @@ function DeliveryForm() {
     setFormData(prev => {
       const items = [...prev.items];
       items[index] = { ...items[index], [name]: value, ...computeItemValues({ ...items[index], [name]: value }) };
-      return { ...prev, items };
+      
+      if (name === 'customer' && value && prev.deliveryDate) {
+        checkSameDayDeliveries(value, prev.deliveryDate);
+      }
+      
+      return { ...prev, items, isSaved: false };
     });
   };
 
-  const addItemRow = () => setFormData(p => ({ ...p, items: [...p.items, { ...stableInitial.items[0] }] }));
-  const removeItemRow = (i) => setFormData(p => ({ ...p, items: p.items.filter((_, idx) => idx !== i) }));
-const validateForm = () => {
-    if (!formData.customerName || !formData.customerCode) {
-      toast.error("Please select a valid customer.");
-      return false;
-    }
+  const addItemRow = () => setFormData(p => ({ ...p, items: [...p.items, { ...stableInitial.items[0] }], isSaved: false }));
+  const removeItemRow = (i) => setFormData(p => ({ ...p, items: p.items.filter((_, idx) => idx !== i), isSaved: false }));
+
+  const validateForm = () => {
     if (!formData.deliveryDate) {
       toast.error("Delivery date is required.");
       return false;
@@ -228,8 +407,8 @@ const validateForm = () => {
         toast.error(`Item selection missing in row ${i + 1}`);
         return false;
       }
-      if (!item.warehouse || item.warehouse === "") {
-        toast.error(`Warehouse missing for item in row ${i + 1}`);
+      if (!item.customer || item.customer === "") {
+        toast.error(`Please select a customer for item in row ${i + 1}`);
         return false;
       }
       if (Number(item.quantity) <= 0) {
@@ -239,6 +418,7 @@ const validateForm = () => {
     }
     return true;
   };
+
   const handleSubmit = async () => {
     if (!validateForm()) return;
 
@@ -251,12 +431,19 @@ const validateForm = () => {
 
       const normalizedItems = formData.items.map(i => ({
         ...i,
-        item:      typeof i.item === "object"      ? i.item._id      : i.item,
+        item: typeof i.item === "object" ? i.item._id : i.item,
         warehouse: typeof i.warehouse === "object" ? i.warehouse._id : i.warehouse,
+        customer: typeof i.customer === "object" ? i.customer._id : i.customer,
       }));
 
       const fd = new FormData();
-      fd.append("deliveryData", JSON.stringify({ ...formData, items: normalizedItems, removedFiles }));
+      fd.append("deliveryData", JSON.stringify({ 
+        ...formData, 
+        items: normalizedItems, 
+        removedFiles,
+        timeSlot,
+        deliveryShift
+      }));
       attachments.forEach(file => fd.append("newFiles", file));
 
       const config = { headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" } };
@@ -266,7 +453,8 @@ const validateForm = () => {
         : await axios.post("/api/delivery", fd, config);
 
       if (res.data.success) {
-        toast.success(editId ? "Delivery Updated" : "Delivery Created");
+        toast.success(editId ? "Delivery Updated" : `Delivery Created: ${res.data.data.deliveryNumber}`);
+        clearLocalStorage();
         router.push("/admin/delivery-view");
       }
     } catch (err) {
@@ -286,17 +474,51 @@ const validateForm = () => {
     }
   };
 
+  const handleSaveDraft = () => {
+    saveToLocalStorage();
+    toast.success("Draft saved successfully");
+  };
+
+  const fetchMonthlySummary = async () => {
+    const firstCustomer = formData.items.find(item => item.customer);
+    if (!firstCustomer || !firstCustomer.customer) {
+      toast.error("Please add at least one item with customer to view monthly summary");
+      return;
+    }
+    
+    try {
+      const token = localStorage.getItem("token");
+      const res = await axios.get("/api/delivery/monthly-summary", {
+        params: { 
+          customerId: firstCustomer.customer, 
+          month: selectedMonth, 
+          year: selectedYear 
+        },
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setMonthlySummary(res.data.data);
+      setShowInvoiceModal(true);
+    } catch (error) {
+      toast.error("Failed to fetch monthly summary");
+    }
+  };
+
   const renderNewFilesPreview = () => attachments.length > 0 && (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 mt-3">
       {attachments.map((file, idx) => {
         if (!(file instanceof File)) return null;
         const url = URL.createObjectURL(file);
         return (
-          <div key={idx} className="relative border rounded p-2 text-center bg-slate-100">
-            {file.type === "application/pdf"
-              ? <object data={url} type="application/pdf" className="h-24 w-full rounded" />
-              : <img src={url} alt={file.name} className="h-24 w-full object-cover rounded" />}
-            <button onClick={() => setAttachments(prev => prev.filter((_, i) => i !== idx))} className="absolute top-1 right-1 bg-red-600 text-white rounded px-1 text-xs">×</button>
+          <div key={idx} className="relative border rounded-xl p-2 text-center bg-gray-50">
+            {file.type === "application/pdf" ? (
+              <object data={url} type="application/pdf" className="h-24 w-full rounded" />
+            ) : (
+              <img src={url} alt={file.name} className="h-24 w-full object-cover rounded" />
+            )}
+            <button onClick={() => setAttachments(prev => prev.filter((_, i) => i !== idx))}
+              className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs">
+              <FaTimes />
+            </button>
           </div>
         );
       })}
@@ -304,26 +526,56 @@ const validateForm = () => {
   );
 
   if (loading) return <div className="p-10 text-center text-gray-400">Loading Delivery Data...</div>;
-  if (error)   return <div className="p-10 text-red-500 text-center">{error}</div>;
+  if (error) return <div className="p-10 text-red-500 text-center">{error}</div>;
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-
-        <button onClick={() => router.push("/admin/delivery-view")}
-          className="flex items-center gap-1.5 text-indigo-600 font-semibold text-sm mb-4 hover:text-indigo-800 transition-colors">
-          <FaArrowLeft className="text-xs" /> Back to Deliveries
-        </button>
-
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+        {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
-          <div>
-            <h1 className="text-2xl font-extrabold tracking-tight text-gray-900">{editId ? "Edit Delivery" : "New Delivery"}</h1>
-            <p className="text-sm text-gray-400 mt-0.5">Fill in the details below</p>
+          <div className="flex items-center gap-4">
+            <button onClick={() => router.push("/admin/delivery-view")}
+              className="flex items-center gap-1.5 text-indigo-600 font-semibold text-sm hover:text-indigo-800 transition-colors">
+              <FaArrowLeft className="text-xs" /> Back
+            </button>
+            <div>
+              <h1 className="text-2xl font-extrabold tracking-tight text-gray-900">
+                {editId ? "Edit Delivery" : "New Delivery"}
+              </h1>
+              <p className="text-sm text-gray-400 mt-0.5">Fill in the details - Customers per item</p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {!editId && (
+              <>
+                <button
+                  onClick={handleSaveDraft}
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-600 text-white rounded-xl text-sm font-semibold hover:bg-gray-700 transition-colors"
+                >
+                  <FaSave /> Save Draft
+                </button>
+                <button
+                  onClick={fetchMonthlySummary}
+                  className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-xl text-sm font-semibold hover:bg-purple-700 transition-colors"
+                >
+                  <FaFileInvoice /> Monthly Summary
+                </button>
+              </>
+            )}
           </div>
         </div>
 
+        {/* Auto-save indicator */}
+        {isSaved && lastAutoSave && (
+          <div className="mb-4 text-right">
+            <span className="text-xs text-green-600 bg-green-50 px-3 py-1 rounded-full">
+              Last saved: {lastAutoSave.toLocaleTimeString()}
+            </span>
+          </div>
+        )}
+
         {stockError && (
-          <div className="mb-5 flex items-start gap-3 bg-red-50 border border-red-200 rounded-2xl px-5 py-4 shadow-sm animate-in fade-in">
+          <div className="mb-5 flex items-start gap-3 bg-red-50 border border-red-200 rounded-2xl px-5 py-4 shadow-sm">
             <div className="w-9 h-9 flex-shrink-0 rounded-xl bg-red-100 flex items-center justify-center text-lg mt-0.5">⚠️</div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-bold text-red-700 mb-0.5">Stock Pre-Check Failed</p>
@@ -333,82 +585,319 @@ const validateForm = () => {
           </div>
         )}
 
-        {/* Customer Section */}
-        <SectionCard icon={FaUser} title="Customer Details" color="indigo">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Delivery Information */}
+        <SectionCard icon={FaCalendarAlt} title="Delivery Information" color="blue">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
-              <Lbl text="Customer Name" req />
-              {(editId || isCopied) ? (
-                <input key="edit-input" className={fi()} name="customerName" value={formData.customerName || ""} onChange={handleChange} />
-              ) : isNewCustomer ? (
-                <div key="new-cust-div" className="space-y-2">
-                  <input key="new-input" className={fi()} name="customerName" value={formData.customerName || ""} onChange={handleChange} placeholder="Enter new customer" />
-                  <button type="button" onClick={() => setIsNewCustomer(false)} className="text-[10px] font-bold text-gray-400 uppercase">⬅ Back to search</button>
-                </div>
-              ) : (
-                <div key="search-cust-div" className="space-y-2">
-                  <CustomerSearch onSelectCustomer={(c) => {
-                    setSelectedCustomer(c);
-                    setFormData(p => ({ ...p, customer: c._id, customerName: c.customerName, customerCode: c.customerCode, contactPerson: c.contactPersonName }));
-                  }} />
-                  <button type="button" onClick={() => setIsNewCustomer(true)} className="text-[10px] font-bold text-indigo-600 uppercase">+ Add new customer</button>
-                </div>
-              )}
+              <Lbl text="Delivery Date" req />
+              <input type="date" className={fi()} name="deliveryDate" value={formData.deliveryDate || ""} onChange={handleDeliveryDateChange} />
             </div>
-            <div><Lbl text="Customer Code" /><input className={fi(true)} value={formData.customerCode} readOnly /></div>
-            <div><Lbl text="Contact Person" /><input className={fi(true)} value={formData.contactPerson} readOnly /></div>
-            <div><Lbl text="Reference No." /><input className={fi()} name="refNumber" value={formData.refNumber || ""} onChange={handleChange} placeholder="e.g. DEL-12345" /></div>
-          </div>
-        </SectionCard>
-
-        {/* Address */}
-        <div className="mb-5">
-          <CustomerAddressSelector
-            customer={selectedCustomer}
-            selectedBillingAddress={formData.billingAddress}
-            selectedShippingAddress={formData.shippingAddress}
-            onBillingAddressSelect={(a) => setFormData(p => ({ ...p, billingAddress: a }))}
-            onShippingAddressSelect={(a) => setFormData(p => ({ ...p, shippingAddress: a }))}
-          />
-        </div>
-
-        {/* Dates */}
-        <SectionCard icon={FaCalendarAlt} title="Dates & Status" color="blue">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div><Lbl text="Delivery Date" req /><input type="date" className={fi()} name="deliveryDate" value={formData.deliveryDate || ""} onChange={handleChange} /></div>
-            <div><Lbl text="Expected Delivery" /><input type="date" className={fi()} name="expectedDeliveryDate" value={formData.expectedDeliveryDate || ""} onChange={handleChange} /></div>
+            <div>
+              <Lbl text="Expected Delivery" />
+              <input type="date" className={fi()} name="expectedDeliveryDate" value={formData.expectedDeliveryDate || ""} onChange={handleChange} />
+            </div>
+            <div>
+              <Lbl text="Time Slot" />
+              <select className={fi()} value={timeSlot} onChange={(e) => setTimeSlot(e.target.value)}>
+                <option value="Morning">Morning (9 AM - 12 PM)</option>
+                <option value="Afternoon">Afternoon (12 PM - 3 PM)</option>
+                <option value="Evening">Evening (3 PM - 6 PM)</option>
+                <option value="Night">Night (6 PM - 9 PM)</option>
+              </select>
+            </div>
             <div>
               <Lbl text="Status" />
               <select className={fi()} name="status" value={formData.status} onChange={handleChange}>
-                <option>Open</option><option>Pending</option><option>Shipped</option><option>Delivered</option><option>Cancelled</option>
+                <option>Draft</option>
+                <option>Open</option>
+                <option>Pending</option>
+                <option>Shipped</option>
+                <option>Delivered</option>
+                <option>Cancelled</option>
               </select>
+            </div>
+            <div>
+              <Lbl text="Reference No." />
+              <input className={fi()} name="refNumber" value={formData.refNumber || ""} onChange={handleChange} placeholder="e.g. DEL-12345" />
+            </div>
+            <div>
+              <Lbl text="Sales Employee" />
+              <input className={fi()} name="salesEmployee" value={formData.salesEmployee || ""} onChange={handleChange} placeholder="Sales person name" />
             </div>
           </div>
         </SectionCard>
 
-        {/* Items */}
+        {/* Same Day Warning */}
+        {showSameDayWarning && sameDayDeliveries.length > 0 && (
+          <div className="mb-5 bg-yellow-50 border border-yellow-200 rounded-2xl p-4">
+            <div className="flex items-start gap-3">
+              <div className="text-yellow-600 text-xl">⚠️</div>
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-yellow-800">Existing deliveries for this customer today:</p>
+                <div className="mt-2 space-y-1 max-h-32 overflow-y-auto">
+                  {sameDayDeliveries.map(del => (
+                    <div key={del._id} className="text-xs text-yellow-700">
+                      • {del.deliveryNumber} - {del.timeSlot || 'No time slot'} (₹{del.grandTotal?.toLocaleString()})
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-yellow-700 mt-2">
+                  This will be delivery #{sameDayDeliveries.length + 1} for today. Shift number: {deliveryShift}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Items Section */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mb-5">
           <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100 bg-emerald-50/40">
-            <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-500"><FaBoxOpen className="text-sm" /></div>
-            <div><p className="text-sm font-bold text-gray-900">Line Items</p></div>
+            <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-500">
+              <FaBoxOpen className="text-sm" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-gray-900">Line Items</p>
+              <p className="text-xs text-gray-500">Each item requires a customer assignment</p>
+            </div>
           </div>
-          <div className="p-4 overflow-x-auto">
-            <ItemSection items={formData.items} onItemChange={handleItemChange} onAddItem={addItemRow} onRemoveItem={removeItemRow} computeItemValues={computeItemValues} />
+          <div className="p-4">
+            <ItemSection
+              items={formData.items}
+              onItemChange={handleItemChange}
+              onAddItem={addItemRow}
+              onRemoveItem={removeItemRow}
+            />
           </div>
         </div>
 
-        {/* Totals */}
+        {/* Item Summary Section */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mb-5">
+          <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-gray-100 bg-purple-50/40">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-purple-100 flex items-center justify-center text-purple-500">
+                <FaBoxOpen className="text-sm" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-gray-900">Item Summary</p>
+                <p className="text-xs text-gray-500">Complete list of all items</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowSummary(!showSummary)}
+              className="text-xs text-purple-600 hover:text-purple-700 font-medium"
+            >
+              {showSummary ? "Hide Summary" : "Show Summary"}
+            </button>
+          </div>
+          
+          {showSummary && (
+            <div className="p-4">
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {formData.items.map((item, idx) => (
+                  <div key={idx} className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-xs font-bold text-gray-400">#{idx + 1}</span>
+                          <h4 className="font-semibold text-gray-800">{item.itemName || "Unnamed Item"}</h4>
+                          {item.itemCode && (
+                            <span className="text-xs text-gray-400 font-mono">({item.itemCode})</span>
+                          )}
+                        </div>
+                        
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                          <div>
+                            <span className="text-gray-500">Customer:</span>
+                            <span className="ml-2 font-medium text-gray-700">{item.customerName || "Not assigned"}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Quantity:</span>
+                            <span className="ml-2 font-medium text-gray-700">{item.quantity}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Unit Price:</span>
+                            <span className="ml-2 font-medium text-gray-700">₹{item.unitPrice}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Total:</span>
+                            <span className="ml-2 font-bold text-emerald-600">₹{(item.totalAmount || 0).toLocaleString()}</span>
+                          </div>
+                        </div>
+                        
+                        {item.itemDescription && (
+                          <p className="text-xs text-gray-500 mt-2">{item.itemDescription}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                
+                {formData.items.length === 0 && (
+                  <div className="text-center py-8 text-gray-400">
+                    <FaBoxOpen className="text-3xl mx-auto mb-2 opacity-30" />
+                    <p className="text-sm">No items added yet</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Customer-wise Summary with Search */}
+        {Object.keys(customerWiseTotals).length > 0 && (
+          <div className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-2xl p-6 mb-6 border border-indigo-200">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-5">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center">
+                  <FaUser className="text-indigo-600 text-lg" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Customer-wise Summary</h3>
+                  <p className="text-sm text-gray-500">Detailed breakdown by customer</p>
+                </div>
+              </div>
+              
+              {/* Customer Search */}
+              <div className="relative">
+                <FaSearch className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm" />
+                <input
+                  type="text"
+                  placeholder="Search customer..."
+                  value={customerSearchTerm}
+                  onChange={(e) => setCustomerSearchTerm(e.target.value)}
+                  className="pl-10 pr-4 py-2 border border-gray-300 rounded-xl text-sm w-64 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none"
+                />
+                {customerSearchTerm && (
+                  <button
+                    onClick={() => setCustomerSearchTerm("")}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
+                  >
+                    <FaTimes className="text-xs" />
+                  </button>
+                )}
+              </div>
+            </div>
+            
+            {/* Scrollable Customer List */}
+            <div className="max-h-[600px] overflow-y-auto space-y-4 pr-2">
+              {Object.entries(filteredCustomerTotals).length > 0 ? (
+                Object.entries(filteredCustomerTotals).map(([custId, data], idx) => (
+                  <div key={custId} className="bg-white rounded-xl border border-indigo-200 overflow-hidden shadow-sm">
+                    <div className="bg-gradient-to-r from-indigo-100 to-white px-5 py-4 border-b border-indigo-200 sticky top-0 bg-white">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-3">
+                            <span className="w-8 h-8 rounded-full bg-indigo-600 text-white text-sm font-bold flex items-center justify-center">
+                              {idx + 1}
+                            </span>
+                            <div>
+                              <h4 className="font-bold text-gray-800 text-base">{data.customerName}</h4>
+                              {data.customerCode && (
+                                <p className="text-xs text-gray-500">Code: {data.customerCode}</p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-2xl font-bold text-indigo-600">₹{data.total.toLocaleString('en-IN')}</div>
+                          <div className="text-xs text-gray-500">
+                            {data.itemCount} {data.itemCount === 1 ? 'item' : 'items'} | 
+                            Subtotal: ₹{data.subtotal.toLocaleString('en-IN')} | 
+                            GST: ₹{data.gstAmount.toLocaleString('en-IN')}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
+                          <tr>
+                            <th className="text-left py-3 px-4 text-xs font-bold text-gray-500 uppercase">#</th>
+                            <th className="text-left py-3 px-4 text-xs font-bold text-gray-500 uppercase">Item</th>
+                            <th className="text-left py-3 px-4 text-xs font-bold text-gray-500 uppercase">Code</th>
+                            <th className="text-right py-3 px-4 text-xs font-bold text-gray-500 uppercase">Qty</th>
+                            <th className="text-right py-3 px-4 text-xs font-bold text-gray-500 uppercase">Price</th>
+                            <th className="text-right py-3 px-4 text-xs font-bold text-gray-500 uppercase">Discount</th>
+                            <th className="text-right py-3 px-4 text-xs font-bold text-gray-500 uppercase">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {formData.items
+                            .filter(item => (item.customer === custId || item.customerName === data.customerName))
+                            .map((item, itemIdx) => (
+                              <tr key={itemIdx} className="hover:bg-gray-50 transition-colors">
+                                <td className="py-2 px-4 text-xs text-gray-500">{itemIdx + 1}</td>
+                                <td className="py-2 px-4">
+                                  <div className="flex items-center gap-2">
+                                    <ItemImage src={item.imageUrl} alt={item.itemName} className="w-8 h-8" />
+                                    <span className="font-medium text-gray-800">{item.itemName || "Unnamed Item"}</span>
+                                  </div>
+                                </td>
+                                <td className="py-2 px-4 text-xs text-gray-500 font-mono">{item.itemCode || "-"}</td>
+                                <td className="py-2 px-4 text-right text-sm">{item.quantity}</td>
+                                <td className="py-2 px-4 text-right text-sm">₹{item.unitPrice}</td>
+                                <td className="py-2 px-4 text-right text-sm text-red-500">-₹{item.discount}</td>
+                                <td className="py-2 px-4 text-right font-semibold text-emerald-600">₹{(item.totalAmount || 0).toLocaleString('en-IN')}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                        <tfoot className="bg-gray-50 border-t-2 border-indigo-200">
+                          <tr>
+                            <td colSpan="6" className="py-3 px-4 text-right font-bold text-gray-700">Subtotal:</td>
+                            <td className="py-3 px-4 text-right font-bold text-gray-800">₹{data.subtotal.toLocaleString('en-IN')}</td>
+                          </tr>
+                          <tr className="border-t border-gray-200">
+                            <td colSpan="6" className="py-2 px-4 text-right font-bold text-gray-700">GST Total:</td>
+                            <td className="py-2 px-4 text-right font-bold text-gray-800">₹{data.gstAmount.toLocaleString('en-IN')}</td>
+                          </tr>
+                          <tr className="bg-indigo-50">
+                            <td colSpan="6" className="py-3 px-4 text-right font-bold text-indigo-700 text-base">Grand Total:</td>
+                            <td className="py-3 px-4 text-right font-bold text-indigo-700 text-lg">₹{data.total.toLocaleString('en-IN')}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-center py-8 bg-white rounded-xl">
+                  <p className="text-gray-400">No customers found matching "{customerSearchTerm}"</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Financial Summary */}
         <SectionCard icon={FaCalculator} title="Financial Summary" color="amber">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            <div><Lbl text="Total Before Discount" /><input readOnly value={`₹ ${formData.totalBeforeDiscount}`} className={fi(true)} /></div>
-            <div><Lbl text="GST Total" /><input readOnly value={`₹ ${formData.gstTotal}`} className={fi(true)} /></div>
-            <div><Lbl text="Freight" /><input type="number" name="freight" value={formData.freight} onChange={handleChange} className={fi()} /></div>
-            <div><Lbl text="Rounding" /><input type="number" name="rounding" value={formData.rounding} onChange={handleChange} className={fi()} /></div>
+            <div>
+              <Lbl text="Total Before Discount" />
+              <input readOnly value={`₹ ${formData.totalBeforeDiscount.toLocaleString()}`} className={fi(true)} />
+            </div>
+            <div>
+              <Lbl text="GST Total" />
+              <input readOnly value={`₹ ${formData.gstTotal.toLocaleString()}`} className={fi(true)} />
+            </div>
+            <div>
+              <Lbl text="Freight" />
+              <input type="number" name="freight" value={formData.freight} onChange={handleChange} className={fi()} />
+            </div>
+            <div>
+              <Lbl text="Rounding" />
+              <input type="number" name="rounding" value={formData.rounding} onChange={handleChange} className={fi()} />
+            </div>
             <div>
               <Lbl text="Grand Total" />
-              <div className="px-3 py-2.5 rounded-lg border-2 border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-extrabold">₹ {formData.grandTotal}</div>
+              <div className="px-3 py-2.5 rounded-lg border-2 border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-extrabold">
+                ₹ {formData.grandTotal.toLocaleString()}
+              </div>
             </div>
-            <div><Lbl text="Open Balance" /><input readOnly value={`₹ ${formData.openBalance}`} className={fi(true)} /></div>
+            <div>
+              <Lbl text="Open Balance" />
+              <input readOnly value={`₹ ${formData.openBalance.toLocaleString()}`} className={fi(true)} />
+            </div>
           </div>
           <div className="mt-4">
             <Lbl text="Remarks" />
@@ -426,21 +915,29 @@ const validateForm = () => {
                 {existingFiles.map((file, idx) => (
                   <div key={idx} className="relative group border rounded-xl p-2 bg-gray-50">
                     <div className="h-20 flex items-center justify-center overflow-hidden rounded-lg">
-                      {(file.fileUrl?.toLowerCase().endsWith(".pdf"))
-                        ? <object data={file.fileUrl} type="application/pdf" className="h-full w-full pointer-events-none" />
-                        : <img src={file.fileUrl} alt={file.fileName} className="h-full object-cover" />}
+                      {(file.fileUrl?.toLowerCase().endsWith(".pdf")) ? (
+                        <FaFilePdf className="text-4xl text-red-500" />
+                      ) : (
+                        <img src={file.fileUrl} alt={file.fileName} className="h-full object-cover" />
+                      )}
                     </div>
-                    <a href={file.fileUrl} target="_blank" rel="noopener noreferrer" className="block text-[10px] text-indigo-600 mt-1 truncate font-semibold">{file.fileName}</a>
+                    <a href={file.fileUrl} target="_blank" rel="noopener noreferrer" className="block text-[10px] text-indigo-600 mt-1 truncate font-semibold">
+                      {file.fileName}
+                    </a>
                     {!isReadOnly && (
-                      <button onClick={() => { setExistingFiles(prev => prev.filter((_, i) => i !== idx)); setRemovedFiles(prev => [...prev, file]); }}
-                        className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-[10px]">
+                      <button onClick={() => {
+                        setExistingFiles(prev => prev.filter((_, i) => i !== idx));
+                        setRemovedFiles(prev => [...prev, file]);
+                      }} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-[10px]">
                         <FaTimes />
                       </button>
                     )}
                   </div>
                 ))}
               </div>
-            ) : null}
+            ) : (
+              <div className="p-3 text-center text-xs text-gray-400">No attachments</div>
+            )}
           </div>
           <label className="flex items-center justify-center gap-3 px-4 py-4 rounded-xl border-2 border-dashed border-gray-200 cursor-pointer hover:bg-indigo-50 transition-all">
             <FaPaperclip className="text-gray-300" />
@@ -454,1186 +951,107 @@ const validateForm = () => {
           {renderNewFilesPreview()}
         </SectionCard>
 
-        <div className="flex items-center justify-between pt-4 pb-10">
-          <button onClick={() => router.push("/admin/delivery-view")} className="px-6 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-600 font-bold text-sm">Cancel</button>
-          <button onClick={handleSubmit} disabled={submitting} className={`px-8 py-2.5 rounded-xl text-white font-bold text-sm shadow-lg ${submitting ? "bg-gray-300" : "bg-indigo-600 hover:bg-indigo-700"}`}>
-            {submitting ? "Processing..." : editId ? <><FaCheck className="text-xs" /> Update Delivery</> : <><FaCheck className="text-xs" /> Create Delivery</>}
+        {/* Action Buttons */}
+        <div className="flex items-center justify-end gap-4 pt-4 pb-10">
+          <button onClick={() => router.push("/admin/delivery-view")}
+            className="px-6 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-600 font-bold text-sm hover:bg-gray-50 transition-colors">
+            Cancel
+          </button>
+          <button onClick={handleSubmit} disabled={submitting}
+            className={`px-8 py-2.5 rounded-xl text-white font-bold text-sm shadow-lg transition-all flex items-center gap-2 ${submitting ? "bg-gray-300 cursor-not-allowed" : "bg-green-600 hover:bg-green-700"}`}>
+            {submitting ? "Processing..." : editId ? <><FaCheck /> Update Delivery</> : <><FaCheck /> Create Delivery</>}
           </button>
         </div>
       </div>
-      <ToastContainer  />
+
+      {/* Monthly Invoice Modal */}
+      {showInvoiceModal && monthlySummary && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center">
+              <div>
+                <h2 className="text-xl font-bold text-gray-900">Monthly Delivery Summary</h2>
+                <p className="text-sm text-gray-500">
+                  {months[selectedMonth - 1]} {selectedYear}
+                </p>
+              </div>
+              <button onClick={() => setShowInvoiceModal(false)} className="text-gray-400 hover:text-gray-600">
+                <FaTimes />
+              </button>
+            </div>
+            <div className="p-6">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div className="bg-blue-50 rounded-xl p-4">
+                  <p className="text-xs text-blue-600">Total Deliveries</p>
+                  <p className="text-2xl font-bold text-blue-900">{monthlySummary.totalDeliveries}</p>
+                </div>
+                <div className="bg-green-50 rounded-xl p-4">
+                  <p className="text-xs text-green-600">Total Amount</p>
+                  <p className="text-2xl font-bold text-green-900">₹{monthlySummary.totalAmount?.toLocaleString()}</p>
+                </div>
+                <div className="bg-yellow-50 rounded-xl p-4">
+                  <p className="text-xs text-yellow-600">Pending Invoicing</p>
+                  <p className="text-2xl font-bold text-yellow-900">₹{monthlySummary.pendingAmount?.toLocaleString()}</p>
+                  <p className="text-xs">{monthlySummary.pendingCount} deliveries</p>
+                </div>
+                <div className="bg-purple-50 rounded-xl p-4">
+                  <p className="text-xs text-purple-600">Already Invoiced</p>
+                  <p className="text-2xl font-bold text-purple-900">₹{monthlySummary.invoicedAmount?.toLocaleString()}</p>
+                  <p className="text-xs">{monthlySummary.invoicedCount} deliveries</p>
+                </div>
+              </div>
+
+              {/* Deliveries Table */}
+              {monthlySummary.deliveries?.length > 0 ? (
+                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 sticky top-0">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-bold text-gray-500">Delivery #</th>
+                        <th className="px-4 py-3 text-left text-xs font-bold text-gray-500">Date</th>
+                        <th className="px-4 py-3 text-left text-xs font-bold text-gray-500">Time Slot</th>
+                        <th className="px-4 py-3 text-right text-xs font-bold text-gray-500">Amount</th>
+                        <th className="px-4 py-3 text-center text-xs font-bold text-gray-500">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {monthlySummary.deliveries.map((delivery) => (
+                        <tr key={delivery._id} className="hover:bg-gray-50">
+                          <td className="px-4 py-3 font-mono text-xs">{delivery.deliveryNumber}</td>
+                          <td className="px-4 py-3">{new Date(delivery.deliveryDate).toLocaleDateString()}</td>
+                          <td className="px-4 py-3">
+                            <span className="px-2 py-1 bg-gray-100 rounded text-xs">
+                              {delivery.timeSlot || `Shift ${delivery.deliveryShift}`}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right font-semibold">₹{delivery.grandTotal?.toLocaleString()}</td>
+                          <td className="px-4 py-3 text-center">
+                            {delivery.isInvoiced ? (
+                              <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs">Invoiced</span>
+                            ) : (
+                              <span className="px-2 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs">Pending</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-400">No deliveries found for this period</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ToastContainer position="top-right" autoClose={3000} />
     </div>
   );
 }
 
-
-// "use client";
-// import React, {
-//   useState,
-//   useEffect,
-//   useCallback,
-//   Suspense,
-// } from "react";
-// import { useRouter, useSearchParams } from "next/navigation";
-// import axios from "axios";
-// import ItemSection from "@/components/ItemSection"; // Assumed to handle item details
-// import CustomerSearch from "@/components/CustomerSearch"; // Assumed to handle customer selection
-// import { toast, ToastContainer } from "react-toastify";
-// import "react-toastify/dist/ReactToastify.css";
-
-// // Assuming '@/components/MultiBatchModalbtach' is the BatchAllocationModal
-// // I'll rename the import locally for clarity, but keep the original path.
-// import BatchAllocationModal from "@/components/MultiBatchModalbtach";
-
-// /* ------------------------------------------------------------------ */
-// /* NOTE: The inline 'BatchModal' function is REMOVED.                 */
-// /* We are only using the imported 'BatchAllocationModal' (which was  */
-// /* 'MultiBatchModalbtach'). Having both leads to confusion and bugs. */
-// /* ------------------------------------------------------------------ */
-
-// /* ------------------------------------------------------------------ */
-// /* Initial form template                                              */
-// /* ------------------------------------------------------------------ */
-// const initialDeliveryState = {
-//   customerCode: "",
-//   customerName: "",
-//   contactPerson: "",
-//   refNumber: "",
-//   salesEmployee: "", // Often used as Delivery Person for Delivery Note
-//   status: "Pending",
-//   orderDate: "",
-//   expectedDeliveryDate: "",
-//   deliveryDate: "", // Important for Delivery Note
-//   deliveryType: "Sales", // Default type
-//   items: [
-//     {
-//       item: "", // Stores item ObjectId from DB
-//       itemCode: "",
-//       itemName: "",
-//       itemDescription: "",
-//       quantity: 0,
-//       allowedQuantity: 0, // This might be from the sales order, if applicable
-//       unitPrice: 0,
-//       discount: 0,
-//       freight: 0,
-//       gstType: 0,
-//       priceAfterDiscount: 0,
-//       totalAmount: 0,
-//       gstAmount: 0,
-//       cgstAmount: 0, // Need these for calculations
-//       sgstAmount: 0,
-//       igstAmount: 0,
-//       tdsAmount: 0,
-//       batches: [], // Array to store allocated batch details {batchCode, allocatedQuantity, etc.}
-//       warehouse: "", // Stores warehouse ObjectId from DB
-//       warehouseName: "",
-//       warehouseCode: "",
-//       errorMessage: "",
-//       taxOption: "GST",
-//       managedByBatch: false, // Default to false, updated on item select
-//       gstRate: 0, // Default to 0, updated on item select
-//       managedBy: "", // Stores 'batch', 'serial', or 'none' from item master
-//     },
-//   ],
-//   remarks: "",
-//   freight: 0,
-//   rounding: 0,
-//   totalDownPayment: 0,
-//   appliedAmounts: 0,
-//   totalBeforeDiscount: 0,
-//   gstTotal: 0,
-//   grandTotal: 0,
-//   openBalance: 0,
-//   fromQuote: false,
-//   attachments: [], // Array for attachment metadata
-// };
-
-// /* helper to format date for HTML date input */
-// const formatDate = (d) =>
-//   d ? new Date(d).toISOString().slice(0, 10) : "";
-
-// /* ------------------------------------------------------------------ */
-// /* Wrapper to make Suspense work                                      */
-// /* ------------------------------------------------------------------ */
-// function DeliveryFormWrapper() {
-//   return (
-//     <Suspense
-//       fallback={
-//         <div className="py-10 text-center">Loading form data…</div>
-//       }
-//     >
-//       <DeliveryForm />
-//     </Suspense>
-//   );
-// }
-
-// /* ------------------------------------------------------------------ */
-// /* Main form                                                        */
-// /* ------------------------------------------------------------------ */
-// function DeliveryForm() {
-//   const router = useRouter();
-//   const query = useSearchParams();
-//   const editId = query.get("editId"); // For editing existing Delivery Notes
-
-//   const [formData, setFormData] = useState(initialDeliveryState);
-//   const [modalItemIndex, setModalItemIndex] = useState(null); // Index of the item for which batch modal is open
-//   const [batchModalOptions, setBatchModalOptions] = useState([]); // State to hold available batches fetched for the modal
-
-//   const [isCopied, setIsCopied] = useState(false); // Flag if data was copied from session storage
-//   const [loading, setLoading] = useState(Boolean(editId)); // Initial loading state for edit mode
-
-//   const [attachments, setAttachments] = useState([]); // Files selected via input for new upload
-//   const [existingFiles, setExistingFiles] = useState([]); // Files associated with the document from DB/copy
-//   const [removedFiles, setRemovedFiles] = useState([]); // Public IDs of files marked for removal
-
-
-//   /* -------------------------------------------------- Load for edit mode */
-//   useEffect(() => {
-//     if (!editId) {
-//       setLoading(false); // If not in edit mode, stop loading
-//       return;
-//     }
-
-//     const fetchDelivery = async () => {
-//       try {
-//         setLoading(true);
-//         const token = localStorage.getItem("token");
-//         if (!token) {
-//           toast.error("Authentication required to fetch delivery.");
-//           router.push("/login"); // Redirect to login if no token
-//           return;
-//         }
-
-//         const { data } = await axios.get(`/api/sales-delivery/${editId}`, {
-//           headers: { Authorization: `Bearer ${token}` },
-//         });
-
-//         if (data.success && data.data) {
-//           const rec = data.data;
-
-//           setFormData((prev) => ({
-//             ...prev,
-//             ...rec,
-//             orderDate: rec.orderDate ? formatDate(rec.orderDate) : "",
-//             expectedDeliveryDate: rec.expectedDeliveryDate ? formatDate(rec.expectedDeliveryDate) : "",
-//             deliveryDate: rec.deliveryDate ? formatDate(rec.deliveryDate) : "",
-//             // Ensure items' managedByBatch is correctly set from backend
-//             items: rec.items.map(item => ({
-//               ...item,
-//               managedByBatch: item.managedBy && item.managedBy.toLowerCase() === 'batch',
-//               batches: item.managedBy && item.managedBy.toLowerCase() === 'batch' && Array.isArray(item.batches)
-//                 ? item.batches.map(b => ({
-//                     batchCode: b.batchCode || b.batchNumber || '',
-//                     allocatedQuantity: Number(b.allocatedQuantity) || Number(b.quantity) || 0,
-//                     expiryDate: b.expiryDate || null,
-//                     manufacturer: b.manufacturer || '',
-//                     unitPrice: Number(b.unitPrice) || 0,
-//                   }))
-//                 : [],
-//             }))
-//           }));
-
-//           if (rec.attachments && Array.isArray(rec.attachments)) {
-//             setExistingFiles(rec.attachments);
-//           } else {
-//             setExistingFiles([]);
-//           }
-//         } else {
-//           toast.error(data.message || "Delivery record not found");
-//         }
-//       } catch (err) {
-//         console.error("Failed to fetch delivery:", err.response?.data?.message || err.message);
-//         toast.error(err.response?.data?.message || "Failed to fetch delivery");
-//       } finally {
-//         setLoading(false);
-//       }
-//     };
-
-//     fetchDelivery();
-//   }, [editId, router]);
-
-
-//   /* ---------------------------------------- Copy from sessionStorage */
-//   useEffect(() => {
-//     const key = "deliveryData"; // Key for Delivery data (e.g., from Sales Order)
-//     const salesOrderDataKey = "salesOrderData"; // Key if copying from a Sales Order directly
-
-//     let stored = sessionStorage.getItem(key);
-//     let isSalesOrderCopy = false;
-
-//     if (!stored) {
-//       stored = sessionStorage.getItem(salesOrderDataKey);
-//       if (stored) {
-//         isSalesOrderCopy = true;
-//         sessionStorage.removeItem(salesOrderDataKey); // Clear after use
-//       }
-//     } else {
-//       sessionStorage.removeItem(key); // Clear after use
-//     }
-
-//     if (!stored) {
-//         return; // No data to copy
-//     }
-
-//     try {
-//       const parsed = JSON.parse(stored);
-//       console.log("Parsed Data on Copy/Load (from session storage):", parsed);
-
-//       // Map fields from Sales Order or existing Delivery to Delivery form
-//       const newFormData = {
-//         ...initialDeliveryState, // Start with clean initial state
-//         ...parsed, // Apply all parsed data
-//         // Overwrite specific fields for a clean copy
-//         refNumber: parsed.refNumber ? `${parsed.refNumber}-DN` : "", // Append -DN for Delivery Note
-//         status: "Pending", // Always start as pending for new/copied doc
-//         orderDate: formatDate(parsed.orderDate || new Date()),
-//         expectedDeliveryDate: formatDate(parsed.expectedDeliveryDate || parsed.dueDate || new Date()),
-//         deliveryDate: "", // Must be set by user or automatically on submission
-//         // Map customer info, handling potential nesting or direct fields
-//         customerCode: parsed.customer?.customerCode || parsed.customerCode || "",
-//         customerName: parsed.customer?.customerName || parsed.customerName || "",
-//         contactPerson: parsed.customer?.contactPersonName || parsed.contactPerson || "",
-//         salesEmployee: parsed.salesEmployee || "",
-//         remarks: parsed.remarks || "",
-//         freight: Number(parsed.freight) || 0,
-//         rounding: Number(parsed.rounding) || 0,
-//         totalDownPayment: Number(parsed.totalDownPayment) || 0,
-//         appliedAmounts: Number(parsed.appliedAmounts) || 0,
-//         fromQuote: isSalesOrderCopy, // Flag if it originated from a sales order (quote)
-//       };
-
-//       // Transform items for the Delivery Note
-//       newFormData.items = (parsed.items || []).map((item) => {
-//         const unitPrice = parseFloat(item.unitPrice) || 0;
-//         const discount = parseFloat(item.discount) || 0;
-//         const quantity = parseFloat(item.quantity) || 0; // Use quantity from source doc
-//         const freight = parseFloat(item.freight) || 0;
-//         const gstRate = parseFloat(item.gstRate) || 0;
-//         const taxOption = item.taxOption || "GST";
-//         const managedBy = item.managedBy || "";
-
-//         const priceAfterDiscount = unitPrice - discount;
-//         const totalAmountBeforeTax = quantity * priceAfterDiscount + freight;
-
-//         let cgstAmount = 0;
-//         let sgstAmount = 0;
-//         let igstAmount = 0;
-//         let gstAmount = 0;
-
-//         if (taxOption === "IGST") {
-//           igstAmount = totalAmountBeforeTax * (gstRate / 100);
-//           gstAmount = igstAmount;
-//         } else {
-//           const halfGstRate = gstRate / 2;
-//           cgstAmount = totalAmountBeforeTax * (halfGstRate / 100);
-//           sgstAmount = totalAmountBeforeTax * (halfGstRate / 100);
-//           gstAmount = cgstAmount + sgstAmount;
-//         }
-
-//         // For Delivery Note, when copying from Sales Order, batches should be *re-allocated*
-//         // or cleared if not explicitly transferred. For now, clear to force user allocation.
-//         const copiedBatches = (managedBy.toLowerCase() === "batch" && Array.isArray(item.batches))
-//             ? item.batches.map(b => ({
-//                 batchCode: b.batchCode || b.batchNumber || '',
-//                 allocatedQuantity: Number(b.allocatedQuantity) || Number(b.quantity) || 0, // This will be the *already allocated* quantity if copying from a delivered SO
-//                 expiryDate: b.expiryDate || null,
-//                 manufacturer: b.manufacturer || '',
-//                 unitPrice: Number(b.unitPrice) || 0,
-//             }))
-//             : [];
-
-
-//         return {
-//           ...item,
-//           item: item.item?._id || item.item || "", // Handle populated item or just ID
-//           itemCode: item.item?.itemCode || item.itemCode || "",
-//           itemName: item.item?.itemName || item.itemName || "",
-//           itemDescription: item.item?.description || item.itemDescription || "",
-//           warehouse: item.warehouse?._id || item.warehouse || "", // Handle populated warehouse or just ID
-//           warehouseName: item.warehouse?.warehouseName || item.warehouseName || "",
-//           warehouseCode: item.warehouse?.warehouseCode || item.warehouseCode || "",
-//           quantity: quantity, // Use the quantity from source document
-//           unitPrice: unitPrice,
-//           discount: discount,
-//           freight: freight,
-//           gstType: item.gstType || 0,
-//           gstRate: gstRate,
-//           taxOption: taxOption,
-//           priceAfterDiscount: priceAfterDiscount,
-//           totalAmount: totalAmountBeforeTax,
-//           gstAmount: gstAmount,
-//           cgstAmount: cgstAmount,
-//           sgstAmount: sgstAmount,
-//           igstAmount: igstAmount,
-//           tdsAmount: item.tdsAmount || 0,
-//           managedBy: managedBy,
-//           managedByBatch: managedBy.toLowerCase() === "batch",
-//           batches: copiedBatches, // Retain copied batches if they exist (good for partial deliveries, etc.)
-//           errorMessage: "",
-//         };
-//       });
-
-//       // Handle attachments
-//       if (Array.isArray(parsed.attachments)) {
-//         setExistingFiles(parsed.attachments);
-//       } else {
-//         setExistingFiles([]);
-//       }
-
-//       setFormData(newFormData);
-//       setIsCopied(true);
-//       toast.success("Data copied successfully!");
-//     } catch (err) {
-//       console.error("❌ Error parsing copied data:", err);
-//       toast.error("Failed to copy data.");
-//     }
-//   }, []); // Run once on mount
-
-
-//   /* ------------------------------------------------ Recalculate totals */
-//   useEffect(() => {
-//     const totalBeforeDiscount = formData.items.reduce(
-//       (acc, it) => {
-//         const up = Number(it.unitPrice) || 0;
-//         const disc = Number(it.discount) || 0;
-//         const qty = Number(it.quantity) || 0;
-//         return acc + (up - disc) * qty;
-//       },
-//       0,
-//     ) ?? 0; // Nullish coalescing for safety
-
-//     const gstTotal = formData.items.reduce((acc, it) => {
-//       if (it.taxOption === "IGST")
-//         return acc + (Number(it.igstAmount) || 0);
-//       return acc + (Number(it.gstAmount) || 0); // gstAmount should be CGST + SGST for GST option
-//     }, 0) ?? 0;
-
-//     const freight = Number(formData.freight) || 0;
-//     const rounding = Number(formData.rounding) || 0;
-//     const grandTotal =
-//       totalBeforeDiscount + gstTotal + freight + rounding;
-
-//     setFormData((p) => ({
-//       ...p,
-//       totalBeforeDiscount,
-//       gstTotal,
-//       grandTotal,
-//       openBalance:
-//         grandTotal -
-//         ((Number(p.totalDownPayment) || 0) +
-//           (Number(p.appliedAmounts) || 0)),
-//     }));
-//   }, [
-//     formData.items,
-//     formData.freight,
-//     formData.rounding,
-//     formData.totalDownPayment,
-//     formData.appliedAmounts,
-//   ]);
-
-
-//   /* ------------------------------------------------ Attachment rendering helper */
-//   const renderNewFilesPreview = () => (
-//     attachments.length > 0 && (
-//       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 mt-3">
-//         {attachments.map((file, idx) => {
-//           if (file instanceof File) {
-//             const url = URL.createObjectURL(file);
-//             const isPDF = file.type === "application/pdf";
-//             return (
-//               <div key={idx} className="relative border rounded p-2 text-center bg-slate-300">
-//                 {isPDF ? (
-//                   <object data={url} type="application/pdf" className="h-24 w-full rounded" />
-//                 ) : (
-//                   <img src={url} alt={file.name} className="h-24 w-full object-cover rounded" />
-//                 )}
-//                 <button onClick={() => setAttachments(prev => prev.filter((_, i) => i !== idx))} className="absolute top-1 right-1 bg-red-600 text-white rounded px-1 text-xs">×</button>
-//               </div>
-//             );
-//           }
-//           return null;
-//         })}
-//       </div>
-//     )
-//   );
-
-//   /* ------------------------------------------------ Field handlers */
-//   const onInput = useCallback((e) => {
-//     const { name, value } = e.target;
-//     setFormData((p) => ({ ...p, [name]: value }));
-//   }, []);
-
-//   const onCustomer = useCallback((c) => {
-//     setFormData((p) => ({
-//       ...p,
-//       customerCode: c.customerCode ?? "",
-//       customerName: c.customerName ?? "",
-//       contactPerson: c.contactPersonName ?? "",
-//     }));
-//   }, []);
-
-//   const onItemField = useCallback((idx, e) => {
-//     const { name, value } = e.target;
-//     setFormData((p) => {
-//       const items = [...p.items];
-//       items[idx] = { ...items[idx], [name]: value };
-
-//       // Recalculate item-level totals on quantity/price/discount change
-//       const item = items[idx];
-//       const unitPrice = parseFloat(item.unitPrice) || 0;
-//       const discount = parseFloat(item.discount) || 0;
-//       const quantity = parseFloat(item.quantity) || 0;
-//       const freight = parseFloat(item.freight) || 0;
-//       const gstRate = parseFloat(item.gstRate) || 0;
-//       const taxOption = item.taxOption || "GST";
-
-//       const priceAfterDiscount = unitPrice - discount;
-//       const totalAmountBeforeTax = quantity * priceAfterDiscount + freight;
-
-//       let calculatedCgstAmount = 0;
-//       let calculatedSgstAmount = 0;
-//       let calculatedIgstAmount = 0;
-//       let calculatedGstAmount = 0;
-
-//       if (taxOption === "IGST") {
-//         calculatedIgstAmount = totalAmountBeforeTax * (gstRate / 100);
-//         calculatedGstAmount = calculatedIgstAmount;
-//       } else {
-//         const halfGstRate = gstRate / 2;
-//         calculatedCgstAmount = totalAmountBeforeTax * (halfGstRate / 100);
-//         calculatedSgstAmount = totalAmountBeforeTax * (halfGstRate / 100);
-//         calculatedGstAmount = calculatedCgstAmount + calculatedSgstAmount;
-//       }
-
-//       items[idx] = {
-//         ...items[idx],
-//         priceAfterDiscount,
-//         totalAmount: totalAmountBeforeTax,
-//         gstAmount: calculatedGstAmount,
-//         cgstAmount: calculatedCgstAmount,
-//         sgstAmount: calculatedSgstAmount,
-//         igstAmount: calculatedIgstAmount,
-//       };
-
-//       // If quantity changes for a batch-managed item, clear batches or adjust as needed
-//       if (item.managedByBatch && name === 'quantity' && parseFloat(value) !== item.quantity) {
-//           items[idx].batches = []; // Clear batches to force re-allocation
-//           toast.info("Quantity changed for a batch-managed item. Please re-allocate batches.");
-//       }
-
-//       return { ...p, items };
-//     });
-//   }, []);
-
-//   const addItem = useCallback(() => {
-//     setFormData((p) => ({
-//       ...p,
-//       items: [...p.items, { ...initialDeliveryState.items[0] }],
-//     }));
-//   }, []);
-
-//   const removeItemRow = useCallback((index) => {
-//     setFormData((prev) => ({
-//       ...prev,
-//       items: prev.items.filter((_, i) => i !== index),
-//     }));
-//   }, []);
-
-//   // Callback for when an item is selected via ItemSearch (from ItemSection)
-//   const handleItemSelect = useCallback(async (index, selectedItem) => {
-//     if (!selectedItem._id) {
-//       toast.error("Selected item does not have a valid ID.");
-//       return;
-//     }
-
-//     // Fetch managedBy value from item master if not already present in selectedItem
-//     let managedByValue = selectedItem.managedBy;
-//     if (!managedByValue || managedByValue.trim() === "") {
-//       try {
-//         const res = await axios.get(`/api/items/${selectedItem._id}`, {
-//           headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }
-//         });
-//         if (res.data.success) {
-//           managedByValue = res.data.data.managedBy;
-//           console.log(`Fetched managedBy for ${selectedItem.itemCode}:`, managedByValue);
-//         }
-//       } catch (error) {
-//         console.error("Error fetching item master details:", error);
-//         managedByValue = ""; // Fallback if fetch fails
-//       }
-//     } else {
-//       console.log(`Using managedBy from selected item for ${selectedItem.itemCode}:`, managedByValue);
-//     }
-
-//     const unitPrice = Number(selectedItem.unitPrice) || 0;
-//     const discount = Number(selectedItem.discount) || 0;
-//     const freight = Number(selectedItem.freight) || 0;
-//     const quantity = 1; // Default quantity when selecting an item
-//     const taxOption = selectedItem.taxOption || "GST";
-//     const gstRate = selectedItem.gstRate ? Number(selectedItem.gstRate) : 0;
-
-//     const priceAfterDiscount = unitPrice - discount;
-//     const totalAmountBeforeTax = quantity * priceAfterDiscount + freight;
-
-//     let cgstAmount = 0;
-//     let sgstAmount = 0;
-//     let igstAmount = 0;
-//     let gstAmount = 0;
-
-//     if (taxOption === "IGST") {
-//       igstAmount = totalAmountBeforeTax * (gstRate / 100);
-//       gstAmount = igstAmount;
-//     } else {
-//       const halfGstRate = gstRate / 2;
-//       cgstAmount = totalAmountBeforeTax * (halfGstRate / 100);
-//       sgstAmount = totalAmountBeforeTax * (halfGstRate / 100);
-//       gstAmount = cgstAmount + sgstAmount;
-//     }
-
-//     const updatedItem = {
-//       item: selectedItem._id, // This will be the ObjectId string for the backend
-//       itemCode: selectedItem.itemCode || "",
-//       itemName: selectedItem.itemName,
-//       itemDescription: selectedItem.description || "",
-//       quantity,
-//       allowedQuantity: selectedItem.allowedQuantity || 0,
-//       unitPrice,
-//       discount,
-//       freight,
-//       gstType: selectedItem.gstType || 0,
-//       gstRate,
-//       taxOption,
-//       priceAfterDiscount,
-//       totalAmount: totalAmountBeforeTax,
-//       gstAmount,
-//       cgstAmount,
-//       sgstAmount,
-//       igstAmount,
-//       managedBy: managedByValue,
-//       managedByBatch: managedByValue.toLowerCase() === "batch",
-//       batches: [], // Initialize empty if batch managed, user will allocate via modal
-//       warehouse: selectedItem.warehouse || "", // This will be the ObjectId string for the backend
-//       warehouseName: selectedItem.warehouseName || "",
-//       warehouseCode: selectedItem.warehouseCode || "",
-//       errorMessage: "",
-//       tdsAmount: 0,
-//     };
-
-//     setFormData((prev) => {
-//       const currentItems = [...prev.items];
-//       currentItems[index] = updatedItem;
-//       return { ...prev, items: currentItems };
-//     });
-//   }, []);
-
-//   /* ------------------------------------------------ Batch updates (from BatchAllocationModal) */
-//   const handleUpdateBatch = useCallback((allocatedBatches) => {
-//     setFormData((prev) => {
-//       const updatedItems = [...prev.items];
-//       const targetItem = { ...updatedItems[modalItemIndex] };
-
-//       targetItem.batches = allocatedBatches.map(b => ({
-//           batchCode: b.batchCode || '',
-//           allocatedQuantity: Number(b.allocatedQuantity) || 0,
-//           expiryDate: b.expiryDate || null,
-//           manufacturer: b.manufacturer || '',
-//           unitPrice: Number(b.unitPrice) || 0,
-//       }));
-
-//       updatedItems[modalItemIndex] = targetItem;
-//       return { ...prev, items: updatedItems };
-//     });
-//   }, [modalItemIndex]);
-
-//   /* Open the Batch Allocation Modal */
-//   const openBatchModal = useCallback(async (index) => {
-//     const currentItem = formData.items[index];
-//     // Crucial validation: Ensure item and warehouse IDs are selected and item is batch-managed
-//     if (!currentItem.item || !currentItem.warehouse) {
-//       toast.warn("Please select an Item and a Warehouse for this line item before allocating batches.");
-//       return;
-//     }
-//     if (!currentItem.managedBy || currentItem.managedBy.toLowerCase() !== 'batch') {
-//       toast.warn(`Item '${currentItem.itemName || 'selected item'}' is not managed by batch. Cannot allocate batches.`);
-//       return;
-//     }
-//     if (currentItem.quantity <= 0) {
-//         toast.warn(`Please enter a quantity greater than 0 for '${currentItem.itemName}' before allocating batches.`);
-//         return;
-//     }
-
-//     console.log("Opening Batch Allocation Modal for item index:", index, "with item ID:", currentItem.item, "warehouse ID:", currentItem.warehouse);
-
-//     try {
-//         const token = localStorage.getItem("token");
-//         if (!token) {
-//             toast.error("Authentication required to fetch inventory batches.");
-//             return;
-//         }
-//         const res = await axios.get(
-//             `/api/inventory-batch/${currentItem.item}/${currentItem.warehouse}`,
-//             { headers: { 'Authorization': `Bearer ${token}` } }
-//         );
-
-//         if (res.data.success) {
-//             setBatchModalOptions(res.data.data.batches || []);
-//             setModalItemIndex(index); // Open modal after successful fetch
-//         } else {
-//             toast.error(res.data.message || "Failed to fetch available batches.");
-//         }
-//     } catch (error) {
-//         console.error("Error fetching available batches:", error);
-//         toast.error(`Error loading available batches: ${error.response?.data?.message || error.message}`);
-//     }
-//   }, [formData.items]);
-
-
-
-// //   const handleSubmit = async () => {
-// //   try {
-// //     const token = localStorage.getItem("token");
-// //     if (!token) {
-// //       toast.error("Authentication required. Please log in.");
-// //       router.push("/login");
-// //       return;
-// //     }
-
-// //     if (!formData.customerName || !formData.refNumber || formData.items.length === 0) {
-// //       toast.error("Please fill in Customer Name, Delivery Number, and add at least one item.");
-// //       return;
-// //     }
-
-// //     // Validate batches
-// //     for (const item of formData.items) {
-// //       if (!item.item || !item.warehouse) throw new Error(`Invalid Item/Warehouse for ${item.itemName}`);
-// //       if (item.quantity <= 0 || item.unitPrice <= 0) throw new Error(`Invalid Quantity/Price for ${item.itemName}`);
-// //       if (item.managedByBatch) {
-// //         const allocatedTotal = item.batches.reduce((sum, b) => sum + (Number(b.allocatedQuantity) || 0), 0);
-// //         if (allocatedTotal !== item.quantity) throw new Error(`Allocated batches must equal item quantity for ${item.itemName}`);
-// //       }
-// //     }
-
-// //     formData.deliveryDate ||= new Date().toISOString().slice(0, 10);
-// //     formData.deliveryType ||= "Sales";
-
-// //     // Ensure sourceModel is correct
-// //     if (formData.sourceId) formData.sourceModel = "salesorder";
-
-// //     const dataToSend = new FormData();
-// //     dataToSend.append("deliveryData", JSON.stringify(formData));
-
-// //     attachments.forEach(file => dataToSend.append("newAttachments", file));
-
-// //     const retainedFiles = existingFiles.filter(
-// //       f => !removedFiles.some(r => r.publicId === f.publicId)
-// //     );
-// //     if (retainedFiles.length) dataToSend.append("existingFiles", JSON.stringify(retainedFiles));
-// //     if (removedFiles.length) dataToSend.append("removedAttachmentIds", JSON.stringify(removedFiles.map(f => f.publicId)));
-
-// //     const url = editId ? `/api/sales-delivery/${editId}` : "/api/sales-delivery";
-// //     const method = editId ? "put" : "post";
-
-// //     const res = await axios({ method, url, data: dataToSend, headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" } });
-
-// //     if (res.data.success) {
-// //       toast.success(editId ? "Delivery updated successfully" : "Delivery created successfully");
-// //       if (!editId) {
-// //         setFormData(initialDeliveryState);
-// //         setAttachments([]);
-// //         setExistingFiles([]);
-// //         setRemovedFiles([]);
-// //       } else {
-// //         setExistingFiles(res.data.delivery?.attachments || []);
-// //         setRemovedFiles([]);
-// //         setAttachments([]);
-// //       }
-// //       router.push("/admin/delivery-view");
-// //     } else throw new Error(res.data.message || "Unknown error");
-
-// //   } catch (err) {
-// //     console.error("❌ Error saving delivery:", err.message);
-// //     toast.error(err.message || "Save failed");
-// //   }
-// // };
-
-
-// const handleSubmit = async () => {
-//   try {
-//     // 1. ✅ Authentication: Correctly checks for the user's token.
-//     const token = localStorage.getItem("token");
-//     if (!token) {
-//       toast.error("Authentication required. Please log in.");
-//       router.push("/login");
-//       return;
-//     }
-
-//     // 2. ✅ Basic Validation: Ensures the most important fields are filled.
-//     if (!formData.customerName || !formData.refNumber || formData.items.length === 0) {
-//       toast.error("Please fill in Customer Name, Delivery Number, and add at least one item.");
-//       return;
-//     }
-
-//     // 3. ✅ Item & Batch Validation: Loops through each item to ensure its data is valid.
-//     for (const item of formData.items) {
-//       if (!item.item || !item.warehouse) {
-//         throw new Error(`Invalid Item/Warehouse for ${item.itemName}`);
-//       }
-//       if (item.quantity <= 0) {
-//         throw new Error(`Quantity must be greater than 0 for ${item.itemName}`);
-//       }
-//       if (item.managedByBatch) {
-//         const allocatedTotal = item.batches.reduce((sum, b) => sum + (Number(b.allocatedQuantity) || 0), 0);
-//         if (allocatedTotal !== item.quantity) {
-//           throw new Error(`Allocated batches must equal item quantity for ${item.itemName}`);
-//         }
-//       }
-//     }
-
-//     // 4. ✅ Data Preparation: Sets default values and prepares the data for sending.
-//     formData.deliveryDate ||= new Date().toISOString().slice(0, 10);
-//     formData.deliveryType ||= "Sales";
-//     if (formData.sourceId) {
-//       formData.sourceModel = "salesorder";
-//     }
-
-//     const dataToSend = new FormData();
-//     // This is the most important line: it takes your entire form state, including the
-//     // full `selectedBin` object, and prepares it to be sent to the backend.
-//     dataToSend.append("deliveryData", JSON.stringify(formData));
-
-//     // 5. ✅ File Handling: Robustly handles new, existing, and removed attachments.
-//     attachments.forEach(file => dataToSend.append("newAttachments", file));
-//     const retainedFiles = existingFiles.filter(
-//       f => !removedFiles.some(r => r.publicId === f.publicId)
-//     );
-//     if (retainedFiles.length) {
-//       dataToSend.append("existingFiles", JSON.stringify(retainedFiles));
-//     }
-//     if (removedFiles.length) {
-//       dataToSend.append("removedAttachmentIds", JSON.stringify(removedFiles.map(f => f.publicId)));
-//     }
-
-//     // 6. ✅ API Submission: Correctly determines the URL and method for creating or editing.
-//     const url = editId ? `/api/sales-delivery/${editId}` : "/api/sales-delivery";
-//     const method = editId ? "put" : "post";
-
-//     const res = await axios({ 
-//       method, 
-//       url, 
-//       data: dataToSend, 
-//       headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" } 
-//     });
-
-//     // 7. ✅ Success Handling: Provides clear feedback and navigates the user.
-//     if (res.data.success) {
-//       toast.success(editId ? "Delivery updated successfully" : "Delivery created successfully");
-//       if (!editId) {
-//         // Resets the form after creating a new delivery
-//         setFormData(initialDeliveryState);
-//         setAttachments([]);
-//         setExistingFiles([]);
-//         setRemovedFiles([]);
-//       } else {
-//         // Updates the file list after editing
-//         setExistingFiles(res.data.delivery?.attachments || []);
-//         setRemovedFiles([]);
-//         setAttachments([]);
-//       }
-//       router.push("/admin/delivery-view");
-//     } else {
-//       throw new Error(res.data.message || "An unknown error occurred");
-//     }
-
-//   } catch (err) {
-//     // 8. ✅ Error Handling: Displays specific, meaningful error messages from the backend.
-//     console.error("❌ Error saving delivery:", err.message);
-//     toast.error(err.message || "Save failed");
-//   }
-// };
-
-//   /* ------------------------------------------------ Render */
-//   if (loading) return <div className="p-8">Loading…</div>;
-
-//   return (
-//     <div className="m-11 p-5 shadow-xl">
-//       <h1 className="mb-4 text-2xl font-bold">
-//         {editId ? "Edit Delivery" : "Create Delivery"}
-//       </h1>
-
-//       {/* ---------------- Customer ---------------- */}
-//       <div className="m-10 flex flex-wrap justify-between rounded-lg border p-5 shadow-lg">
-//         <div className="basis-full md:basis-1/2 space-y-4 px-2">
-//           <div>
-//             <label className="mb-2 block font-medium">
-//               Customer Code
-//             </label>
-//             <input
-//               type="text"
-//               name="customerCode"
-//               value={formData.customerCode || ""} // Ensure string value
-//               readOnly
-//               className="w-full rounded border bg-gray-100 p-2"
-//             />
-//           </div>
-//           <div>
-//             {(formData.customerName && isCopied) || editId ? ( // Show read-only if customer data is copied OR in edit mode
-//               <>
-//                 <label className="mb-2 block font-medium">
-//                   Customer Name
-//                 </label>
-//                 <input
-//                   type="text"
-//                   name="customerName"
-//                   value={formData.customerName || ""} // Ensure string value
-//                   onChange={onInput}
-//                   readOnly={Boolean(isCopied || editId)} // Make read-only if copied or editing
-//                   className={`w-full rounded border p-2 ${Boolean(isCopied || editId) ? 'bg-gray-100' : ''}`}
-//                 />
-//               </>
-//             ) : (
-//               <>
-//                 <label className="mb-2 block font-medium">
-//                   Customer Name
-//                 </label>
-//                 <CustomerSearch onSelectCustomer={onCustomer} />
-//               </>
-//             )}
-//           </div>
-//           <div>
-//             <label className="mb-2 block font-medium">
-//               Contact Person
-//             </label>
-//             <input
-//               type="text"
-//               name="contactPerson"
-//               value={formData.contactPerson || ""} // Ensure string value
-//               readOnly
-//               className="w-full rounded border bg-gray-100 p-2"
-//             />
-//           </div>
-//           <div>
-//             <label className="mb-2 block font-medium">
-//               Delivery No
-//             </label>
-//             <input
-//               type="text"
-//               name="refNumber"
-//               value={formData.refNumber || ""} // Ensure string value
-//               onChange={onInput}
-//               className="w-full rounded border p-2"
-//             />
-//           </div>
-//         </div>
-//         {/* status & dates */}
-//         <div className="basis-full md:basis-1/2 space-y-4 px-2">
-//           <div>
-//             <label className="mb-2 block font-medium">Status</label>
-//             <select
-//               name="status"
-//               value={formData.status || "Pending"} // Ensure string value and default
-//               onChange={onInput}
-//               className="w-full rounded border p-2"
-//             >
-//               <option value="Pending">Pending</option>
-//               <option value="Confirmed">Confirmed</option>
-//               <option value="Delivered">Delivered</option> {/* Added Delivered status */}
-//             </select>
-//           </div>
-//           <div>
-//             <label className="mb-2 block font-medium">
-//               Order Date
-//             </label>
-//             <input
-//               type="date"
-//               name="orderDate"
-//               value={formData.orderDate || ""} // Ensure string value
-//               onChange={onInput}
-//               className="w-full rounded border p-2"
-//             />
-//           </div>
-//           <div>
-//             <label className="mb-2 block font-medium">
-//               Expected Delivery Date
-//             </label>
-//             <input
-//               type="date"
-//               name="expectedDeliveryDate"
-//               value={formData.expectedDeliveryDate || ""} // Ensure string value
-//               onChange={onInput}
-//               className="w-full rounded border p-2"
-//             />
-//           </div>
-//           <div> {/* Added Delivery Date field */}
-//             <label className="mb-2 block font-medium">
-//               Actual Delivery Date
-//             </label>
-//             <input
-//               type="date"
-//               name="deliveryDate"
-//               value={formData.deliveryDate || ""}
-//               onChange={onInput}
-//               className="w-full rounded border p-2"
-//             />
-//           </div>
-//         </div>
-//       </div>
-
-//       {/* ---------------- Items ---------------- */}
-//       <h2 className="mt-6 text-xl font-semibold">Items</h2>
-//       <div className="m-10 flex flex-col rounded-lg border p-5 shadow-lg">
-//         <ItemSection
-//           items={formData.items}
-//           onItemChange={onItemField}
-//           onAddItem={addItem}
-//           onRemoveItem={removeItemRow}
-//           setFormData={setFormData}
-//           onItemSelect={handleItemSelect} 
-//         />
-//       </div>
-
-//       {/* ---------------- Batch selection ---------------- */}
-//       <div className="mb-6">
-//         <h2 className="text-xl font-semibold">Batch Allocation Summary</h2>
-
-//         {formData.items.map((item, index) => {
-//           if (!item.managedBy || item.managedBy.toLowerCase() !== 'batch') {
-//             return null;
-//           }
-
-//           const totalAllocatedForCurrentItem = (item.batches || []).reduce(
-//             (sum, b) => sum + (Number(b.allocatedQuantity) || 0),
-//             0
-//           );
-
-//           return (
-//             <div key={index} className="border p-4 my-2 rounded-lg bg-white shadow-sm">
-//               <div className="flex items-center justify-between mb-2">
-//                 <span className="font-semibold text-lg">{item.itemName || `Item ${index + 1}`} (Required: {item.quantity})</span>
-//                 <button
-//                   onClick={() => openBatchModal(index)}
-//                   className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
-//                   disabled={!item.item || !item.warehouse || item.quantity <= 0}
-//                 >
-//                   Allocate Batches
-//                 </button>
-//               </div>
-
-//               {/* Display currently allocated batches for this item */}
-//               {item.batches && item.batches.length > 0 ? (
-//                 <div className="mt-2 pl-4 text-sm">
-//                   <p className="font-medium mb-1">Current Allocations:</p>
-//                   <ul className="list-disc list-inside">
-//                     {item.batches.map((batch, idx) => (
-//                       <li key={idx} className="text-gray-700">
-//                         Batch: **{batch.batchCode || 'N/A'}** &mdash; Allocated: **{Number(batch.allocatedQuantity) || 0}**
-//                       </li>
-//                     ))}
-//                   </ul>
-//                   <p className={`mt-2 font-bold ${totalAllocatedForCurrentItem !== item.quantity ? "text-red-600" : "text-green-600"}`}>
-//                     Total Allocated: {totalAllocatedForCurrentItem} / {item.quantity}
-//                   </p>
-//                 </div>
-//               ) : (
-//                 <p className="text-sm text-gray-500 italic pl-4">No batches currently allocated for this item.</p>
-//               )}
-//             </div>
-//           );
-//         })}
-//       </div>
-//       {/* ---------------- Remarks & employee ---------------- */}
-//       <div className="grid grid-cols-1 gap-4 p-8 m-8 rounded-lg border shadow-lg md:grid-cols-2">
-//         <div>
-//           <label className="mb-2 block font-medium">
-//             Delivery Person
-//           </label>
-//           <input
-//             type="text"
-//             name="salesEmployee"
-//             value={formData.salesEmployee || ""} // Ensure string value
-//             onChange={onInput}
-//             className="w-full rounded border p-2"
-//           />
-//         </div>
-//         <div>
-//           <label className="mb-2 block font-medium">Remarks</label>
-//           <textarea
-//             name="remarks"
-//             value={formData.remarks || ""} // Ensure string value
-//             onChange={onInput}
-//             className="w-full rounded border p-2"
-//           />
-//         </div>
-//       </div>
-
-//       {/* ---------------- Summary ---------------- */}
-//       <div className="grid grid-cols-1 gap-4 p-8 m-8 rounded-lg border shadow-lg md:grid-cols-2">
-//         <div>
-//           <label className="mb-2 block font-medium">
-//             Taxable Amount
-//           </label>
-//           <input
-//             type="number"
-//             value={formData.totalBeforeDiscount.toFixed(2)}
-//             readOnly
-//             className="w-full rounded border bg-gray-100 p-2"
-//           />
-//         </div>
-//         <div>
-//           <label className="mb-2 block font-medium">Rounding</label>
-//           <input
-//             type="number"
-//             name="rounding"
-//             value={formData.rounding || 0} // Ensure number value
-//             onChange={onInput}
-//             className="w-full rounded border p-2"
-//           />
-//         </div>
-//         <div>
-//           <label className="mb-2 block font-medium">GST Total</label>
-//           <input
-//             type="number"
-//             value={formData.gstTotal.toFixed(2)}
-//             readOnly
-//             className="w-full rounded border bg-gray-100 p-2"
-//           />
-//         </div>
-//         <div>
-//           <label className="mb-2 block font-medium">Grand Total</label>
-//           <input
-//             type="number"
-//             value={formData.grandTotal.toFixed(2)}
-//             readOnly
-//             className="w-full rounded border bg-gray-100 p-2"
-//           />
-//         </div>
-//       </div>
-//       {/* Attachments */}
-
-//       <div className="mt-6 p-8 m-8 border rounded-lg shadow-lg"> {/* Consolidated attachments section */}
-//         <label className="font-medium block mb-2">Attachments</label>
-
-//         {/* Existing Files Display */}
-//         {loading ? ( // Use the main loading state for attachments too
-//           <div className="p-3 text-center text-gray-500 bg-gray-100 rounded border">
-//             Loading attachments...
-//           </div>
-//         ) : existingFiles && existingFiles.length > 0 ? (
-//           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 mb-4 bg-gray-50 p-3 rounded border">
-//             {existingFiles.map((file, idx) => {
-//               const url = file.fileUrl;
-//               const name = file.fileName;
-//               const isPDF = file.fileType === "application/pdf" || url.toLowerCase().endsWith(".pdf");
-
-//               return (
-//                 <div key={idx} className="relative border rounded p-2 text-center bg-slate-200">
-//                   {isPDF ? (
-//                     <object data={url} type="application/pdf" className="h-24 w-full rounded" />
-//                   ) : (
-//                     <img src={url} alt={name} className="h-24 w-full object-cover rounded" />
-//                   )}
-//                   <a
-//                     href={url}
-//                     target="_blank"
-//                     rel="noopener noreferrer"
-//                     className="block text-blue-600 text-xs mt-1 truncate"
-//                   >
-//                     {name}
-//                   </a>
-//                   {/* Allow removal of existing files only in edit mode, not if it's a new copy */}
-//                   {editId && (
-//                     <button
-//                       onClick={() => {
-//                         setExistingFiles(prev => prev.filter((_, i) => i !== idx));
-//                         setRemovedFiles(prev => [...(prev || []), file]); // Add to removed list for backend processing
-//                         toast.info(`Marked ${name} for removal.`);
-//                       }}
-//                       className="absolute top-1 right-1 bg-red-600 text-white rounded-full h-5 w-5 flex items-center justify-center text-xs"
-//                     >
-//                       ×
-//                     </button>
-//                   )}
-//                 </div>
-//               );
-//             })}
-//           </div>
-//         ) : (
-//           <div className="p-3 text-center text-gray-500 bg-gray-100 rounded border">
-//             No attachments available
-//           </div>
-//         )}
-
-//         {/* New Uploads Input */}
-//         <input
-//           type="file"
-//           multiple
-//           accept="image/*,application/pdf"
-//           onChange={(e) => {
-//             const files = Array.from(e.target.files);
-//             setAttachments((prev) => {
-//               const m = new Map(prev.map((f) => [f.name + f.size, f]));
-//               files.forEach((f) => m.set(f.name + f.size, f));
-//               return [...m.values()];
-//             });
-//             e.target.value = ""; // Clear input after selection
-//           }}
-//           className="border px-3 py-2 w-full mt-2 rounded"
-//         />
-
-//         {/* Previews of new uploads */}
-//         {renderNewFilesPreview()}
-//       </div>
-
-//       {/* ---------------- buttons ---------------- */}
-//       <div className="flex flex-wrap gap-4 p-8 m-8 rounded-lg border shadow-lg">
-//         <button
-//           onClick={handleSubmit}
-//           className="rounded bg-orange-400 px-4 py-2 text-white hover:bg-orange-300"
-//         >
-//           {editId ? "Update Delivery" : "Add Delivery"}
-//         </button>
-//         <button
-//           onClick={() => {
-//             setFormData(initialDeliveryState);
-//             router.push("/admin/delivery-view");
-//           }}
-//           className="rounded bg-orange-400 px-4 py-2 text-white hover:bg-orange-300"
-//         >
-//           Cancel
-//         </button>
-//         <button
-//           onClick={() => {
-//             // Include both current form data and existing files (which are part of the document)
-//             sessionStorage.setItem(
-//               "deliveryData",
-//               JSON.stringify({ ...formData, attachments: existingFiles }),
-//             );
-//             toast.success("Delivery data copied!");
-//           }}
-//           className="rounded bg-gray-500 px-4 py-2 text-white hover:bg-gray-400"
-//         >
-//           Copy Current Form
-//         </button>
-//       </div>
-
-//       {/* modal + toast */}
-//       {modalItemIndex !== null && (
-//         <BatchAllocationModal
-//           itemsbatch={{
-//             itemId: formData.items[modalItemIndex].item,
-//             sourceWarehouse: formData.items[modalItemIndex].warehouse,
-//             itemName: formData.items[modalItemIndex].itemName,
-//             qty: formData.items[modalItemIndex].quantity,
-//             currentAllocations: formData.items[modalItemIndex].batches,
-//           }}
-//           batchOptions={batchModalOptions}
-//           onClose={() => setModalItemIndex(null)}
-//           onUpdateBatch={handleUpdateBatch}
-//         />
-//       )}
-
-//       <ToastContainer position="bottom-right" autoClose={5000} hideProgressBar={false} newestOnTop={false} closeOnClick rtl={false} pauseOnFocusLoss draggable pauseOnHover />
-//     </div>
-//   );
-// }
-
-// export default DeliveryFormWrapper;
+const months = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+];
