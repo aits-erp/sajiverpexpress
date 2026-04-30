@@ -52,7 +52,7 @@ const DeliverySchema = new Schema({
 
   deliveryType: { type: String },
   deliveryDate: { type: Date, required: true },
-  deliveryNumber: { type: String },
+  deliveryNumber1: { type: String },
   documentNumberDelivery: { type: String, required: true },
 
   salesOrderId: { type: Schema.Types.ObjectId, ref: "SalesOrder" },

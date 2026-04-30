@@ -34,7 +34,7 @@ const deliveryItemSchema = new mongoose.Schema({
   itemInvoiceId: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice" },
   itemInvoicedAt: Date,
   
-  warehouse: { type: mongoose.Schema.Types.ObjectId, ref: "Warehouse" },
+
   warehouseName: String,
   warehouseCode: String,
   binLocations: Array,
@@ -43,7 +43,7 @@ const deliveryItemSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const deliverySchema = new mongoose.Schema({
-  deliveryNumber: { type: String, unique: true, sparse: true },
+  deliveryNumber: { type: String },
   deliverySequence: { type: Number, default: 1 },
   refNumber: String,
   salesEmployee: String,
