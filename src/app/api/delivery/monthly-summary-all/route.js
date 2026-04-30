@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import connectDB from "@/lib/db";
 import Delivery from "@/models/Delivery";
+import Customer from "@/models/CustomerModel"
 import { getTokenFromHeader, verifyJWT } from "@/lib/auth";
 
 export async function GET(req) {
